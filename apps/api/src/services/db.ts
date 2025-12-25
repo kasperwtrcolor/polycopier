@@ -1,12 +1,21 @@
-import pg from "pg";
+import { Pool, type QueryResultRow } from "pg";
 
-// Create a connection pool using the DATABASE_URL environment variable
-export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) throw new Error("Missing DATABASE_URL env var");
+
+export const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 /**
- * Execute a parameterized query against the database.  Returns a typed pg.QueryResult.
+ * Typed query helper.
+ * Fixes TS2344 by constraining T to QueryResultRow.
  */
-export async function q<T = any>(text: string, params: any[] = []) {
-  const res = await pool.query(text, params);
-  return res as pg.QueryResult<T>;
+export async function q<T extends QueryResultRow = any>(
+  text: string,
+  params: any[] = []
+): Promise<T[]> {
+  const res = await pool.query<T>(text, params);
+  return res.rows;
 }
