@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { Pool } from "pg";
 import fetch from "node-fetch";
 
 dotenv.config();
@@ -13,169 +12,144 @@ app.use(express.json());
 const PORT = Number(process.env.PORT || 3000);
 
 /**
- * Database
+ * Set these in Render -> (API service) -> Environment:
+ *
+ * PM_TOP_TRADERS_URL=https://...           (returns top traders JSON)
+ * PM_LIVE_TRADES_URL=https://...           (returns live trades JSON)
+ * PM_TRADER_TRADES_URL_TEMPLATE=https://.../trader/{id}/trades?limit={limit}
+ *
+ * You can also use templates without limit placeholders; we'll append ?limit=
  */
-const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  throw new Error("Missing DATABASE_URL env var");
+const PM_TOP_TRADERS_URL = process.env.PM_TOP_TRADERS_URL || "";
+const PM_LIVE_TRADES_URL = process.env.PM_LIVE_TRADES_URL || "";
+const PM_TRADER_TRADES_URL_TEMPLATE = process.env.PM_TRADER_TRADES_URL_TEMPLATE || "";
+
+type AnyJson = any;
+
+function requireEnv(name: string, value: string) {
+  if (!value) {
+    const msg = `Missing env var: ${name}. Set it in Render Environment for the API service.`;
+    const err = new Error(msg);
+    // @ts-ignore
+    err.statusCode = 501;
+    throw err;
+  }
 }
 
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+function withLimit(url: string, limit: number) {
+  // If url already has ?, add &limit= else ?limit=
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}limit=${encodeURIComponent(String(limit))}`;
+}
 
-/**
- * Base routes
- */
-app.get("/", (_req, res) => {
-  res.status(200).send("polycopier api ok");
-});
-
-app.get("/health", (_req, res) => {
-  res.status(200).json({ ok: true });
-});
-
-/**
- * PolyCopier configuration
- * Stored in Postgres for the worker to read
- */
-app.post("/config", async (req, res) => {
-  try {
-    const { botHandle, enabled, pollIntervalMs } = req.body ?? {};
-
-    if (typeof botHandle !== "string" || !botHandle.trim()) {
-      return res.status(400).json({ error: "botHandle is required" });
-    }
-
-    const enabledBool = enabled === undefined ? true : Boolean(enabled);
-    const poll = pollIntervalMs === undefined ? 30000 : Number(pollIntervalMs);
-
-    const q = `
-      INSERT INTO bot_config (bot_handle, enabled, poll_interval_ms, updated_at)
-      VALUES ($1, $2, $3, NOW())
-      ON CONFLICT (bot_handle)
-      DO UPDATE SET
-        enabled = EXCLUDED.enabled,
-        poll_interval_ms = EXCLUDED.poll_interval_ms,
-        updated_at = NOW()
-      RETURNING bot_handle, enabled, poll_interval_ms, updated_at;
-    `;
-
-    const result = await pool.query(q, [
-      botHandle.toLowerCase(),
-      enabledBool,
-      poll
-    ]);
-
-    return res.status(200).json({
-      ok: true,
-      config: result.rows[0]
-    });
-  } catch (err: any) {
-    console.error("POST /config error:", err);
-    return res.status(500).json({ ok: false, error: err?.message || "server error" });
+function applyTemplate(template: string, vars: Record<string, string | number>) {
+  let out = template;
+  for (const [k, v] of Object.entries(vars)) {
+    out = out.replaceAll(`{${k}}`, String(v));
   }
-});
+  return out;
+}
 
-app.get("/config/:botHandle", async (req, res) => {
-  try {
-    const botHandle = String(req.params.botHandle || "").toLowerCase();
-
-    const result = await pool.query(
-      `
-      SELECT bot_handle, enabled, poll_interval_ms, updated_at
-      FROM bot_config
-      WHERE bot_handle = $1
-      LIMIT 1;
-      `,
-      [botHandle]
-    );
-
-    return res.status(200).json({
-      ok: true,
-      config: result.rows[0] ?? null
-    });
-  } catch (err: any) {
-    console.error("GET /config/:botHandle error:", err);
-    return res.status(500).json({ ok: false, error: err?.message || "server error" });
-  }
-});
-
-/**
- * ============================
- * POLYMARKET SIGNAL ENDPOINTS
- * ============================
- */
-
-/**
- * Top traders leaderboard (proxy)
- *
- * Query params:
- *   period = daily | weekly | monthly | all
- *   category = all | politics | tech | sports | crypto | finance | culture
- */
-app.get("/pm/leaderboard", async (req, res) => {
-  try {
-    const period = String(req.query.period || "daily");
-    const category = String(req.query.category || "all");
-
-    const url =
-      `https://693ee85255fb0d5e85311330-api.poof.new/api/leaderboard` +
-      `?period=${period}&category=${category}`;
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      return res.status(502).json({ error: "Upstream leaderboard failed" });
+async function fetchJson(url: string): Promise<AnyJson> {
+  const r = await fetch(url, {
+    headers: {
+      "accept": "application/json",
+      "user-agent": "polycopier-api"
     }
+  });
 
-    const data = await response.json();
+  const text = await r.text();
+  let json: AnyJson = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = { raw: text };
+  }
+
+  if (!r.ok) {
+    const err: any = new Error(`Upstream error ${r.status}`);
+    err.statusCode = r.status;
+    err.payload = json;
+    throw err;
+  }
+
+  return json;
+}
+
+// Basic routes
+app.get("/", (_req, res) => res.status(200).send("polycopier api ok"));
+app.get("/health", (_req, res) => res.status(200).json({ ok: true }));
+
+// “Render API route list” (you define these; Render doesn't auto-list)
+app.get("/routes", (_req, res) => {
+  res.json({
+    ok: true,
+    routes: [
+      "GET /",
+      "GET /health",
+      "GET /routes",
+      "GET /pm/top-traders",
+      "GET /pm/live-trades?limit=50",
+      "GET /pm/trader/:id/trades?limit=100"
+    ]
+  });
+});
+
+// ---- Polymarket proxy routes ----
+
+// GET /pm/top-traders
+app.get("/pm/top-traders", async (_req, res) => {
+  try {
+    requireEnv("PM_TOP_TRADERS_URL", PM_TOP_TRADERS_URL);
+    const data = await fetchJson(PM_TOP_TRADERS_URL);
     return res.json(data);
-  } catch (err: any) {
-    console.error("GET /pm/leaderboard error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+  } catch (e: any) {
+    const status = e?.statusCode || 500;
+    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
   }
 });
 
-/**
- * Live trades (proxy)
- *
- * Query params:
- *   traders = comma-separated trader addresses
- *   limit   = number (default 50)
- */
-app.get("/pm/trades", async (req, res) => {
+// GET /pm/live-trades?limit=50
+app.get("/pm/live-trades", async (req, res) => {
   try {
-    const traders = String(req.query.traders || "");
+    requireEnv("PM_LIVE_TRADES_URL", PM_LIVE_TRADES_URL);
     const limit = Number(req.query.limit || 50);
-
-    if (!traders) {
-      return res.status(400).json({ error: "traders query param required" });
-    }
-
-    const encoded = encodeURIComponent(traders);
-    const url =
-      `https://693ee85255fb0d5e85311331-api.poof.new/api/trades` +
-      `?traders=${encoded}&limit=${limit}`;
-
-    const response = await fetch(url);
-
-    if (!response.ok) {
-      return res.status(502).json({ error: "Upstream trades failed" });
-    }
-
-    const data = await response.json();
+    const url = withLimit(PM_LIVE_TRADES_URL, Number.isFinite(limit) ? limit : 50);
+    const data = await fetchJson(url);
     return res.json(data);
-  } catch (err: any) {
-    console.error("GET /pm/trades error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+  } catch (e: any) {
+    const status = e?.statusCode || 500;
+    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
   }
 });
 
-/**
- * Start server
- */
+// GET /pm/trader/:id/trades?limit=100
+app.get("/pm/trader/:id/trades", async (req, res) => {
+  try {
+    requireEnv("PM_TRADER_TRADES_URL_TEMPLATE", PM_TRADER_TRADES_URL_TEMPLATE);
+
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "missing trader id" });
+
+    const limit = Number(req.query.limit || 100);
+    const lim = Number.isFinite(limit) ? limit : 100;
+
+    // If template contains {id} and/or {limit}, fill them.
+    // If no {limit}, we’ll append ?limit=
+    let url = applyTemplate(PM_TRADER_TRADES_URL_TEMPLATE, { id, limit: lim });
+
+    if (!PM_TRADER_TRADES_URL_TEMPLATE.includes("{limit}")) {
+      url = withLimit(url, lim);
+    }
+
+    const data = await fetchJson(url);
+    return res.json(data);
+  } catch (e: any) {
+    const status = e?.statusCode || 500;
+    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
+  }
+});
+
 app.listen(PORT, () => {
-  console.log(`PolyCopier API listening on :${PORT}`);
+  console.log(`API listening on :${PORT}`);
 });
