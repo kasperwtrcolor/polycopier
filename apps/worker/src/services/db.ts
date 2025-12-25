@@ -1,12 +1,20 @@
-import pg from "pg";
-
-// Create a connection pool using the DATABASE_URL environment variable
-export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+import { Pool, type QueryResultRow } from "pg";
 
 /**
- * Execute a parameterized query against the database.  Returns a typed pg.QueryResult.
+ * Postgres connection pool
  */
-export async function q<T = any>(text: string, params: any[] = []) {
-  const res = await pool.query(text, params);
-  return res as pg.QueryResult<T>;
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
+
+/**
+ * Typed query helper.
+ * The generic must extend QueryResultRow for pg typings.
+ */
+export async function q<T extends QueryResultRow = QueryResultRow>(
+  text: string,
+  params: any[] = []
+) {
+  const res = await pool.query<T>(text, params);
+  return res;
 }
