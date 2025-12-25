@@ -1,0 +1,16 @@
+import { q } from "./db.js";
+
+/**
+ * Append a log entry for a user.  Used by the worker and API to record informational events.
+ */
+export async function log(
+  userId: string,
+  level: "info" | "warn" | "error" | "success",
+  message: string,
+  meta: any = {}
+): Promise<void> {
+  await q(
+    "INSERT INTO bot_logs(user_id, level, message, meta) VALUES($1,$2,$3,$4::jsonb)",
+    [userId, level, message, JSON.stringify(meta)]
+  );
+}
