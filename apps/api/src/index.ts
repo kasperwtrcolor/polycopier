@@ -29,15 +29,13 @@ type AnyJson = any;
 function requireEnv(name: string, value: string) {
   if (!value) {
     const msg = `Missing env var: ${name}. Set it in Render Environment for the API service.`;
-    const err = new Error(msg);
-    // @ts-ignore
+    const err: any = new Error(msg);
     err.statusCode = 501;
     throw err;
   }
 }
 
 function withLimit(url: string, limit: number) {
-  // If url already has ?, add &limit= else ?limit=
   const sep = url.includes("?") ? "&" : "?";
   return `${url}${sep}limit=${encodeURIComponent(String(limit))}`;
 }
@@ -45,7 +43,9 @@ function withLimit(url: string, limit: number) {
 function applyTemplate(template: string, vars: Record<string, string | number>) {
   let out = template;
   for (const [k, v] of Object.entries(vars)) {
-    out = out.replaceAll(`{${k}}`, String(v));
+    const token = `{${k}}`;
+    // replaceAll without using String.prototype.replaceAll (ES2021)
+    out = out.split(token).join(String(v));
   }
   return out;
 }
@@ -53,13 +53,14 @@ function applyTemplate(template: string, vars: Record<string, string | number>) 
 async function fetchJson(url: string): Promise<AnyJson> {
   const r = await fetch(url, {
     headers: {
-      "accept": "application/json",
-      "user-agent": "polycopier-api"
-    }
+      accept: "application/json",
+      "user-agent": "polycopier-api",
+    },
   });
 
   const text = await r.text();
   let json: AnyJson = null;
+
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
@@ -90,8 +91,8 @@ app.get("/routes", (_req, res) => {
       "GET /routes",
       "GET /pm/top-traders",
       "GET /pm/live-trades?limit=50",
-      "GET /pm/trader/:id/trades?limit=100"
-    ]
+      "GET /pm/trader/:id/trades?limit=100",
+    ],
   });
 });
 
@@ -105,7 +106,9 @@ app.get("/pm/top-traders", async (_req, res) => {
     return res.json(data);
   } catch (e: any) {
     const status = e?.statusCode || 500;
-    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
+    return res
+      .status(status)
+      .json({ ok: false, error: e?.message || "failed", details: e?.payload });
   }
 });
 
@@ -114,12 +117,17 @@ app.get("/pm/live-trades", async (req, res) => {
   try {
     requireEnv("PM_LIVE_TRADES_URL", PM_LIVE_TRADES_URL);
     const limit = Number(req.query.limit || 50);
-    const url = withLimit(PM_LIVE_TRADES_URL, Number.isFinite(limit) ? limit : 50);
+    const url = withLimit(
+      PM_LIVE_TRADES_URL,
+      Number.isFinite(limit) ? limit : 50
+    );
     const data = await fetchJson(url);
     return res.json(data);
   } catch (e: any) {
     const status = e?.statusCode || 500;
-    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
+    return res
+      .status(status)
+      .json({ ok: false, error: e?.message || "failed", details: e?.payload });
   }
 });
 
@@ -134,8 +142,6 @@ app.get("/pm/trader/:id/trades", async (req, res) => {
     const limit = Number(req.query.limit || 100);
     const lim = Number.isFinite(limit) ? limit : 100;
 
-    // If template contains {id} and/or {limit}, fill them.
-    // If no {limit}, we’ll append ?limit=
     let url = applyTemplate(PM_TRADER_TRADES_URL_TEMPLATE, { id, limit: lim });
 
     if (!PM_TRADER_TRADES_URL_TEMPLATE.includes("{limit}")) {
@@ -146,7 +152,9 @@ app.get("/pm/trader/:id/trades", async (req, res) => {
     return res.json(data);
   } catch (e: any) {
     const status = e?.statusCode || 500;
-    return res.status(status).json({ ok: false, error: e?.message || "failed", details: e?.payload });
+    return res
+      .status(status)
+      .json({ ok: false, error: e?.message || "failed", details: e?.payload });
   }
 });
 
