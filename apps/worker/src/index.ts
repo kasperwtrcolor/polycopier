@@ -1,10 +1,12 @@
 import "dotenv/config";
+import { migrate } from "./services/db.js";
 import { tick } from "./engine.js";
 
-// Determine polling interval; default to 1500 ms
+await migrate();
+
 const interval = Number(process.env.POLL_INTERVAL_MS || 1500);
 
-async function loop(): Promise<void> {
+async function loop() {
   try {
     await tick();
   } catch (e: any) {
